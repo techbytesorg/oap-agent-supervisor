@@ -1,10 +1,15 @@
 import os
+import logging
+import jwt
 from langgraph.pregel.remote import RemoteGraph
 from langgraph_supervisor import create_supervisor
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from langchain_core.runnables import RunnableConfig
 from langchain.chat_models import init_chat_model
+from oap_supervisor.utils.structured_output import load_schema_model
+
+logger = logging.getLogger(__name__)
 
 # This system prompt is ALWAYS included at the bottom of the message.
 UNEDITABLE_SYSTEM_PROMPT = """\nYou can invoke sub-agents by calling tools in this format:
@@ -204,7 +209,7 @@ def make_prompt(cfg: GraphConfigPydantic):
     return cfg.system_prompt + UNEDITABLE_SYSTEM_PROMPT
 
 
-def graph(config: RunnableConfig):
+async def graph(config: RunnableConfig):
     cfg = GraphConfigPydantic(**config.get("configurable", {}))
     supabase_access_token = config.get("configurable", {}).get(
         "x-supabase-access-token"
@@ -216,6 +221,30 @@ def graph(config: RunnableConfig):
     # Get the API key from the RunnableConfig or from the environment variable
     model_api_key = get_api_key_for_model(cfg.supervisor_model, config) or "No token found"
 
+    # Check for structured output schema
+    schema_name = config.get("configurable", {}).get("OutputSchemaName", None)
+    response_format = None
+
+    if schema_name:
+        logger.debug(f"Processing structured output request for schema: {schema_name}")
+        try:
+            # Extract user ID from JWT token
+            user_id = None
+            if supabase_access_token:
+                try:
+                    decoded = jwt.decode(supabase_access_token, options={"verify_signature": False})
+                    user_id = decoded.get("sub")
+                    logger.debug(f"Extracted user_id from JWT token")
+                except Exception as jwt_error:
+                    logger.warning(f"JWT decode error: {jwt_error}")
+
+            response_format = await load_schema_model(schema_name, user_id)
+            logger.info(f"Successfully loaded schema {schema_name} for structured output")
+        except Exception as e:
+            logger.error(f"Error loading schema {schema_name}: {e}")
+            # Continue without structured output
+            response_format = None
+
     return create_supervisor(
         child_graphs,
         model=make_model(cfg, model_api_key),
@@ -223,5 +252,6 @@ def graph(config: RunnableConfig):
         config_schema=GraphConfigPydantic,
         handoff_tool_prefix="delegate_to_",
         output_mode="full_history",
+        response_format=response_format,
     )
 
