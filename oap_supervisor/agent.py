@@ -228,11 +228,9 @@ async def graph(config: RunnableConfig):
     if schema_name:
         logger.debug(f"Processing structured output request for schema: {schema_name}")
         try:
-            # Try to get user ID from config
-            user_id = config.get("configurable", {}).get("user_id")
-
-            if not user_id and supabase_access_token:
-                # Extract user ID from JWT token
+            # Extract user ID from JWT token
+            user_id = None
+            if supabase_access_token:
                 try:
                     decoded = jwt.decode(supabase_access_token, options={"verify_signature": False})
                     user_id = decoded.get("sub")
@@ -244,6 +242,7 @@ async def graph(config: RunnableConfig):
             logger.info(f"Successfully loaded schema {schema_name} for structured output")
         except Exception as e:
             logger.error(f"Error loading schema {schema_name}: {e}")
+            # Continue without structured output
             response_format = None
 
     return create_supervisor(
