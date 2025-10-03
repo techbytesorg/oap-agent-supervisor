@@ -210,23 +210,44 @@ def make_prompt(cfg: GraphConfigPydantic):
 
 
 async def graph(config: RunnableConfig):
+    logger.info(f"[Agent] Config keys: {list(config.keys())}")
+    logger.info(f"[Agent] Configurable keys: {list(config.get('configurable', {}).keys())}")
+
+    # Check if metadata contains supabaseAccessToken
+    metadata = config.get("metadata", {})
+    logger.info(f"[Agent] Metadata keys: {list(metadata.keys())}")
+    if "supabaseAccessToken" in metadata:
+        logger.info(f"[Agent] Metadata.supabaseAccessToken present: True, length: {len(metadata['supabaseAccessToken'])} chars")
+
     cfg = GraphConfigPydantic(**config.get("configurable", {}))
-    supabase_access_token = config.get("configurable", {}).get(
-        "x-supabase-access-token"
-    )
+
+    # Try to get Supabase token from configurable first, then fallback to metadata
+    supabase_access_token = config.get("configurable", {}).get("x-supabase-access-token")
+    if not supabase_access_token:
+        supabase_access_token = config.get("metadata", {}).get("supabaseAccessToken")
+        logger.info(f"[Auth] Using Supabase token from metadata")
+    else:
+        logger.info(f"[Auth] Using Supabase token from configurable")
+
+    logger.info(f"[Auth] Supabase token present: {supabase_access_token is not None}, length: {len(supabase_access_token) if supabase_access_token else 0} chars")
 
     # Pass the token to make_child_graphs, which now handles None values
     child_graphs = make_child_graphs(cfg, supabase_access_token)
+    logger.info(f"[Supervisor] Configured {len(child_graphs)} child agent(s)")
+    if child_graphs:
+        agent_names = [graph.name for graph in child_graphs]
+        logger.info(f"[Supervisor] Child agents: {agent_names}")
 
     # Get the API key from the RunnableConfig or from the environment variable
     model_api_key = get_api_key_for_model(cfg.supervisor_model, config) or "No token found"
+    logger.info(f"[Supervisor] Using model: {cfg.supervisor_model}")
 
     # Check for structured output schema
     schema_name = config.get("configurable", {}).get("OutputSchemaName", None)
     response_format = None
 
     if schema_name:
-        logger.debug(f"Processing structured output request for schema: {schema_name}")
+        logger.debug(f"[OutputSchema] Processing structured output: {schema_name}")
         try:
             # Extract user ID from JWT token
             user_id = None
@@ -234,16 +255,17 @@ async def graph(config: RunnableConfig):
                 try:
                     decoded = jwt.decode(supabase_access_token, options={"verify_signature": False})
                     user_id = decoded.get("sub")
-                    logger.debug(f"Extracted user_id from JWT token")
                 except Exception as jwt_error:
-                    logger.warning(f"JWT decode error: {jwt_error}")
+                    logger.warning(f"[OutputSchema] JWT decode error: {jwt_error}")
 
             response_format = await load_schema_model(schema_name, user_id)
-            logger.info(f"Successfully loaded schema {schema_name} for structured output")
+            logger.info(f"[OutputSchema] Loaded schema: {schema_name}")
         except Exception as e:
-            logger.error(f"Error loading schema {schema_name}: {e}")
+            logger.error(f"[OutputSchema] Failed to load {schema_name}: {e}")
             # Continue without structured output
             response_format = None
+
+    logger.info(f"[Supervisor] Creating supervisor with {len(child_graphs)} agent(s), structured_output={'enabled' if response_format else 'disabled'}")
 
     return create_supervisor(
         child_graphs,
