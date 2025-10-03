@@ -1,9 +1,12 @@
 import os
 import asyncio
+import logging
 from langgraph_sdk import Auth
 from langgraph_sdk.auth.types import StudioUser
 from supabase import create_client, Client
 from typing import Optional, Any
+
+logger = logging.getLogger(__name__)
 
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
@@ -11,6 +14,9 @@ supabase: Optional[Client] = None
 
 if supabase_url and supabase_key:
     supabase = create_client(supabase_url, supabase_key)
+    logger.info("[Auth] Supabase client initialized")
+else:
+    logger.warning("[Auth] Supabase client not initialized - missing SUPABASE_URL or SUPABASE_KEY")
 
 # The "Auth" object is a container that LangGraph will use to mark our authentication function
 auth = Auth()
@@ -24,6 +30,7 @@ async def get_current_user(authorization: str | None) -> Auth.types.MinimalUserD
 
     # Ensure we have authorization header
     if not authorization:
+        logger.warning("[Auth] Authorization header missing")
         raise Auth.exceptions.HTTPException(
             status_code=401, detail="Authorization header missing"
         )
@@ -32,13 +39,16 @@ async def get_current_user(authorization: str | None) -> Auth.types.MinimalUserD
     try:
         scheme, token = authorization.split()
         assert scheme.lower() == "bearer"
+        logger.debug(f"[Auth] Token received, length: {len(token)} chars")
     except (ValueError, AssertionError):
+        logger.warning("[Auth] Invalid authorization header format")
         raise Auth.exceptions.HTTPException(
             status_code=401, detail="Invalid authorization header format"
         )
 
     # Ensure Supabase client is initialized
     if not supabase:
+        logger.error("[Auth] Supabase client not initialized")
         raise Auth.exceptions.HTTPException(
             status_code=500, detail="Supabase client not initialized"
         )
@@ -54,16 +64,21 @@ async def get_current_user(authorization: str | None) -> Auth.types.MinimalUserD
         user = response.user
 
         if not user:
+            logger.warning("[Auth] Invalid token or user not found")
             raise Auth.exceptions.HTTPException(
                 status_code=401, detail="Invalid token or user not found"
             )
 
         # Return user info if valid
+        logger.info(f"[Auth] User authenticated: {user.id}")
         return {
             "identity": user.id,
         }
+    except Auth.exceptions.HTTPException:
+        raise
     except Exception as e:
         # Handle any errors from Supabase
+        logger.error(f"[Auth] Authentication error: {str(e)}")
         raise Auth.exceptions.HTTPException(
             status_code=401, detail=f"Authentication error: {str(e)}"
         )
@@ -83,12 +98,14 @@ async def on_thread_create(
     """
 
     if isinstance(ctx.user, StudioUser):
+        logger.debug("[Auth] Thread create: Studio user, skipping ownership")
         return
 
     # Add owner metadata to the thread being created
     # This metadata is stored with the thread and persists
     metadata = value.setdefault("metadata", {})
     metadata["owner"] = ctx.user.identity
+    logger.debug(f"[Auth] Thread create: Setting owner to {ctx.user.identity}")
 
 
 @auth.on.threads.read
@@ -106,8 +123,10 @@ async def on_thread_read(
     return a filter to ensure users can only see their own threads.
     """
     if isinstance(ctx.user, StudioUser):
+        logger.debug("[Auth] Thread access: Studio user, no filter")
         return
 
+    logger.debug(f"[Auth] Thread access: Filtering by owner {ctx.user.identity}")
     return {"owner": ctx.user.identity}
 
 
@@ -117,12 +136,14 @@ async def on_assistants_create(
     value: Auth.types.on.assistants.create.value,
 ):
     if isinstance(ctx.user, StudioUser):
+        logger.debug("[Auth] Assistant create: Studio user, skipping ownership")
         return
 
     # Add owner metadata to the assistant being created
     # This metadata is stored with the assistant and persists
     metadata = value.setdefault("metadata", {})
     metadata["owner"] = ctx.user.identity
+    logger.debug(f"[Auth] Assistant create: Setting owner to {ctx.user.identity}")
 
 
 @auth.on.assistants.read
@@ -141,16 +162,20 @@ async def on_assistants_read(
     """
 
     if isinstance(ctx.user, StudioUser):
+        logger.debug("[Auth] Assistant access: Studio user, no filter")
         return
 
+    logger.debug(f"[Auth] Assistant access: Filtering by owner {ctx.user.identity}")
     return {"owner": ctx.user.identity}
 
 
 @auth.on.store()
 async def authorize_store(ctx: Auth.types.AuthContext, value: dict):
     if isinstance(ctx.user, StudioUser):
+        logger.debug("[Auth] Store access: Studio user, no restriction")
         return
 
     # The "namespace" field for each store item is a tuple you can think of as the directory of an item.
     namespace: tuple = value["namespace"]
+    logger.debug(f"[Auth] Store access: Checking namespace {namespace} for user {ctx.user.identity}")
     assert namespace[0] == ctx.user.identity, "Not authorized"
