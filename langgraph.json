@@ -8,5 +8,11 @@
   "env": ".env",
   "auth": {
     "path": "./oap_supervisor/security/auth.py:auth"
+  },
+  "http": {
+    "configurable_headers": {
+      "include": ["x-*"],
+      "exclude": ["authorization"]
+    }
   }
 }
